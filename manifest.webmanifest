@@ -1,0 +1,19 @@
+{
+  "name": "Sonora — música a tu manera",
+  "short_name": "Sonora",
+  "description": "Explora y disfruta una experiencia musical original.",
+  "lang": "es",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#111019",
+  "theme_color": "#111019",
+  "icons": [
+    {
+      "src": "sonora-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
