@@ -7,8 +7,17 @@ Sonora es una experiencia musical en español inspirada en el proyecto OpenTune.
 - Búsqueda de canciones y artistas, listas, biblioteca y favoritos guardados en el dispositivo.
 - Reproducción de demostración sintetizada al pulsar reproducir; no se descargan ni transmiten grabaciones comerciales.
 - Controles de reproducción, mezcla, repetición, posición y volumen.
+- Catálogo en línea de Jamendo para buscar y escuchar música publicada con licencias Creative Commons.
 - Interfaz adaptable e instalación como PWA en navegadores compatibles.
-- Contenedor Android que carga la experiencia desde sus propios recursos, sin permisos de red.
+- App Android que carga la experiencia local e incluye permiso de Internet para el catálogo y el streaming.
+
+## Conectar música en línea
+
+1. Registra gratis una aplicación en el [portal de desarrolladores de Jamendo](https://devportal.jamendo.com/) y copia su **Client ID** público. No uses ni compartas una contraseña o clave privada.
+2. En Sonora, pulsa el icono ⚙ y pega el Client ID en **Conectar Jamendo**. El identificador se guarda únicamente en el almacenamiento local de ese dispositivo.
+3. Abre **Explorar** para cargar selecciones destacadas o busca una canción, artista o género. Reproduce una canción con sus controles habituales.
+
+Sonora transmite los enlaces `audio` que devuelve la API; no descarga ni almacena el audio para reproducción sin conexión. Cada resultado identifica a su artista, enlaza a su página en Jamendo y muestra el enlace a la licencia Creative Commons correspondiente. Respeta las condiciones de esa licencia para cada pista. El uso comercial de la API requiere autorización de Jamendo. Consulta [las condiciones de la API](https://devportal.jamendo.com/api_terms_of_use) antes de publicar o monetizar la app.
 
 ## Probar la app web
 
@@ -18,7 +27,7 @@ Sirve la raíz del repositorio con cualquier servidor web estático y abre `http
 python -m http.server 8000
 ```
 
-La app también funciona sin conexión después de la primera carga cuando se sirve desde HTTPS o `localhost`.
+La interfaz funciona sin conexión después de la primera carga cuando se sirve desde HTTPS o `localhost`; el catálogo y el streaming requieren Internet.
 
 ## Crear el APK de Android
 

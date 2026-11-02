@@ -17,16 +17,26 @@
     { name: "Mi biblioteca", tracks: tracks.map(track => track.id) }
   ];
 
+  const JAMENDO_API = "https://api.jamendo.com/v3.0/tracks/";
+  const JAMENDO_CLIENT_KEY = "sonora-jamendo-client-id";
+  const savedClientId = readClientId();
   const state = {
     view: "home",
     playlist: null,
     currentId: null,
     queue: tracks.map(track => track.id),
-    favorites: loadList("sonora-favorites").filter(id => tracks.some(track => track.id === id)),
+    favorites: loadList("sonora-favorites").filter(id => isSupportedTrackId(id)),
     customPlaylists: loadList("sonora-playlists")
       .filter(playlist => playlist && typeof playlist.name === "string" && Array.isArray(playlist.tracks))
-      .map(playlist => ({ ...playlist, tracks: playlist.tracks.filter(id => tracks.some(track => track.id === id)) })),
+      .map(playlist => ({ ...playlist, tracks: playlist.tracks.filter(id => isSupportedTrackId(id)) })),
     playlistTracks: loadRecord("sonora-playlist-tracks"),
+    jamendoClientId: savedClientId,
+    catalogResults: [],
+    catalogTracks: Object.create(null),
+    catalogStatus: "",
+    catalogError: false,
+    catalogRequestId: 0,
+    audioElement: null,
     playing: false,
     shuffled: false,
     repeating: false,
@@ -37,6 +47,7 @@
     synthTimer: null,
     synthStep: 0,
     toastTimer: null,
+    searchTimer: null,
     promptEvent: null,
     previousViews: [],
     forwardViews: []
@@ -67,9 +78,29 @@
     playlistName: document.getElementById("playlist-name"),
     addDialog: document.getElementById("add-to-playlist-dialog"),
     playlistSelect: document.getElementById("playlist-select"),
-    toast: document.getElementById("toast")
+    toast: document.getElementById("toast"),
+    catalogNotice: document.getElementById("catalog-notice"),
+    catalogMessage: document.getElementById("catalog-message"),
+    catalogStatus: document.getElementById("catalog-status"),
+    playerBadge: document.getElementById("source-badge"),
+    footerNote: document.getElementById("footer-note"),
+    musicSettings: document.getElementById("music-settings-dialog"),
+    clientId: document.getElementById("jamendo-client-id")
   };
   let trackToAdd = null;
+
+  function readClientId() {
+    try {
+      return localStorage.getItem(JAMENDO_CLIENT_KEY) || "";
+    } catch (error) {
+      console.error("No se pudo leer el Client ID guardado:", error);
+      return "";
+    }
+  }
+
+  function isSupportedTrackId(id) {
+    return tracks.some(track => track.id === id) || /^jamendo-\d+$/.test(id);
+  }
 
   function loadList(key) {
     try {
@@ -109,7 +140,7 @@
       ...defaultPlaylists.map(playlist => ({
         ...playlist,
         tracks: Array.isArray(state.playlistTracks[playlist.name])
-          ? state.playlistTracks[playlist.name].filter(id => tracks.some(track => track.id === id))
+          ? state.playlistTracks[playlist.name].filter(id => isSupportedTrackId(id))
           : [...playlist.tracks]
       })),
       ...state.customPlaylists
@@ -117,20 +148,21 @@
   }
 
   function getTrack(id) {
-    return tracks.find(track => track.id === id);
+    return tracks.find(track => track.id === id) || state.catalogTracks[id] || null;
   }
 
   function getActiveTracks() {
     const query = els.search.value.trim().toLocaleLowerCase("es");
     let result = tracks;
-    if (state.view === "favorites") result = tracks.filter(track => state.favorites.includes(track.id));
+    if (state.view === "explore") result = state.catalogResults;
+    if (state.view === "favorites") result = state.favorites.map(getTrack).filter(Boolean);
     if (state.view === "library") {
-      const liked = tracks.filter(track => state.favorites.includes(track.id));
+      const liked = state.favorites.map(getTrack).filter(Boolean);
       result = liked.length ? liked : tracks;
     }
     if (state.view === "playlist" && state.playlist) {
       const playlist = allPlaylists().find(item => item.name === state.playlist);
-      result = playlist ? tracks.filter(track => playlist.tracks.includes(track.id)) : [];
+      result = playlist ? playlist.tracks.map(getTrack).filter(Boolean) : [];
     }
     if (query) {
       result = result.filter(track => `${track.title} ${track.artist} ${track.album}`.toLocaleLowerCase("es").includes(query));
@@ -145,6 +177,124 @@
 
   function artworkStyle(track) {
     return `background: radial-gradient(circle at 35% 25%, ${track.colors[1]}, transparent 55%), linear-gradient(145deg, ${track.colors[0]}, ${track.colors[1]});`;
+  }
+
+  function safeHttpsUrl(value, fallback = "") {
+    try {
+      const url = new URL(value);
+      return url.protocol === "https:" ? url.href : fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  function toJamendoTrack(item) {
+    const audioUrl = safeHttpsUrl(item.audio);
+    const licenseUrl = safeHttpsUrl(item.license_ccurl);
+    if (!/^\d+$/.test(String(item.id || "")) || !item.name || !item.artist_name || !audioUrl
+      || !licenseUrl || new URL(licenseUrl).hostname !== "creativecommons.org") return null;
+    const track = {
+      id: `jamendo-${item.id}`,
+      source: "jamendo",
+      title: String(item.name),
+      artist: String(item.artist_name),
+      album: String(item.album_name || "Sencillo"),
+      seconds: Number.isFinite(Number(item.duration)) ? Math.max(1, Number(item.duration)) : 0,
+      audioUrl,
+      imageUrl: safeHttpsUrl(item.album_image || item.image),
+      shareUrl: safeHttpsUrl(item.shareurl, `https://www.jamendo.com/track/${item.id}`),
+      licenseUrl,
+      colors: ["#49425e", "#c5abd6"],
+      glyph: "♫"
+    };
+    state.catalogTracks[track.id] = track;
+    return track;
+  }
+
+  function setCatalogStatus(message = "", isError = false) {
+    state.catalogStatus = message;
+    state.catalogError = isError;
+    els.catalogStatus.textContent = message;
+    els.catalogStatus.classList.toggle("is-error", isError);
+    els.catalogStatus.hidden = !message || state.view !== "explore" || !state.jamendoClientId;
+  }
+
+  function jsonp(url) {
+    return new Promise((resolve, reject) => {
+      const callbackName = `sonoraJamendo_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      const script = document.createElement("script");
+      let timeoutId;
+      const cleanup = () => {
+        window.clearTimeout(timeoutId);
+        delete window[callbackName];
+        script.remove();
+      };
+      window[callbackName] = response => {
+        cleanup();
+        resolve(response);
+      };
+      script.onerror = () => {
+        cleanup();
+        reject(new Error("No pudimos conectar con Jamendo. Comprueba tu conexión e inténtalo otra vez."));
+      };
+      const params = new URLSearchParams(url.search);
+      params.set("callback", callbackName);
+      script.src = `${JAMENDO_API}?${params.toString()}`;
+      timeoutId = window.setTimeout(() => {
+        cleanup();
+        reject(new Error("Jamendo tardó demasiado en responder. Inténtalo otra vez."));
+      }, 15000);
+      document.head.appendChild(script);
+    });
+  }
+
+  async function loadCatalog({ query = "", ids = null } = {}) {
+    if (!state.jamendoClientId) {
+      render();
+      return;
+    }
+    const requestId = ++state.catalogRequestId;
+    state.catalogResults = [];
+    setCatalogStatus("Buscando música en Jamendo…");
+    render();
+    try {
+      const params = new URLSearchParams({
+        client_id: state.jamendoClientId,
+        format: "json",
+        limit: "40",
+        audioformat: "mp32",
+        include: "licenses"
+      });
+      if (ids?.length) {
+        params.set("id", ids.map(id => id.replace(/^jamendo-/, "")).join(" "));
+      } else if (query.trim()) {
+        params.set("search", query.trim());
+      } else {
+        params.set("featured", "true");
+        params.set("order", "popularity_month_desc");
+      }
+      const response = await jsonp(new URL(`${JAMENDO_API}?${params.toString()}`));
+      if (requestId !== state.catalogRequestId) return;
+      if (response?.headers?.status !== "success") {
+        throw new Error(response?.headers?.error_message || "Jamendo no pudo completar la búsqueda.");
+      }
+      const results = Array.isArray(response.results)
+        ? response.results.map(toJamendoTrack).filter(Boolean)
+        : [];
+      state.catalogResults = results;
+      setCatalogStatus(results.length === 1
+        ? "1 canción disponible · Jamendo"
+        : results.length
+          ? `${results.length} canciones disponibles · Jamendo`
+          : "No encontramos canciones con audio y licencia Creative Commons para esta búsqueda.");
+      render();
+    } catch (error) {
+      if (requestId !== state.catalogRequestId) return;
+      console.error("No se pudo cargar música de Jamendo:", error);
+      state.catalogResults = [];
+      setCatalogStatus(error.message, true);
+      render();
+    }
   }
 
   function renderPlaylists() {
@@ -164,10 +314,11 @@
     els.albumGrid.innerHTML = cards.map(track => `
       <article class="album-card" data-album="${escapeAttribute(track.album)}">
         <div class="album-art" style="${artworkStyle(track)}">
+          ${track.imageUrl ? `<img src="${escapeAttribute(track.imageUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : ""}
           <span class="album-glyph" aria-hidden="true">${track.glyph}</span>
           <button class="album-play" data-play-album="${escapeAttribute(track.album)}" aria-label="Reproducir ${escapeAttribute(track.album)}">▶</button>
         </div>
-        <div class="album-copy"><strong>${escapeHtml(track.album)}</strong><span>${escapeHtml(track.artist)} · Selección original</span></div>
+        <div class="album-copy"><strong>${escapeHtml(track.album)}</strong><span>${escapeHtml(track.artist)} · ${track.source === "jamendo" ? "Jamendo · Creative Commons" : "Selección original"}</span></div>
       </article>`).join("");
   }
 
@@ -175,16 +326,22 @@
     els.trackList.innerHTML = activeTracks.map((track, index) => `
       <div class="track-row${state.currentId === track.id && state.playing ? " is-playing" : ""}" role="listitem" data-track-row="${track.id}">
         <span class="track-number">${state.currentId === track.id && state.playing ? "♪" : String(index + 1).padStart(2, "0")}</span>
-        <button class="track-main" data-play="${track.id}" aria-label="Reproducir ${escapeAttribute(track.title)}">
-          <span class="track-art" style="${artworkStyle(track)}" aria-hidden="true">${track.glyph}</span>
-          <span class="track-text"><strong>${escapeHtml(track.title)}</strong><span>${escapeHtml(track.artist)}</span></span>
+        <button class="track-main" data-play="${escapeAttribute(track.id)}" aria-label="Reproducir ${escapeAttribute(track.title)}">
+          <span class="track-art" style="${artworkStyle(track)}" aria-hidden="true">${track.imageUrl ? `<img src="${escapeAttribute(track.imageUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : track.glyph}</span>
+          <span class="track-text"><strong>${escapeHtml(track.title)}</strong><span>${escapeHtml(track.artist)}${track.source === "jamendo" ? " · " + escapeHtml(track.album) : ""}</span></span>
         </button>
         <span class="track-album">${escapeHtml(track.album)}</span>
         <span class="track-duration">${formatTime(track.seconds)}</span>
+        ${track.source === "jamendo" ? `<span class="track-credit"><a href="${escapeAttribute(track.shareUrl)}" target="_blank" rel="noopener noreferrer" aria-label="Ver esta canción de ${escapeAttribute(track.artist)} en Jamendo">Jamendo · artista ↗</a><a class="track-license" href="${escapeAttribute(track.licenseUrl)}" target="_blank" rel="noopener noreferrer">Licencia CC ↗</a></span>` : `<span class="track-credit"></span>`}
         <button class="track-like${state.favorites.includes(track.id) ? " is-liked" : ""}" data-like="${track.id}" aria-label="${state.favorites.includes(track.id) ? "Quitar de" : "Añadir a"} Me gusta" aria-pressed="${state.favorites.includes(track.id)}">♡</button>
         <button class="track-add" data-add="${track.id}" aria-label="Añadir ${escapeAttribute(track.title)} a una lista">+</button>
       </div>`).join("");
-    els.emptyState.hidden = activeTracks.length > 0;
+    els.emptyState.textContent = state.view === "explore" && !state.jamendoClientId
+      ? "Configura tu Client ID de Jamendo para explorar música en línea."
+      : state.view === "favorites" && !state.favorites.length
+        ? "Tus canciones favoritas aparecerán aquí."
+        : "No encontramos música con ese nombre. Prueba otra búsqueda.";
+    els.emptyState.hidden = activeTracks.length > 0 || (state.view === "explore" && !state.jamendoClientId);
   }
 
   function render() {
@@ -193,7 +350,11 @@
     const activeTracks = getActiveTracks();
     els.pageTitle.textContent = names[state.view];
     els.shelfTitle.textContent = titles[state.view];
-    els.tracksTitle.textContent = state.view === "favorites" ? "Canciones que guardaste" : "Escucha y descubre";
+    els.tracksTitle.textContent = state.view === "favorites"
+      ? "Canciones que guardaste"
+      : state.view === "explore"
+        ? "Música con licencias Creative Commons"
+        : "Escucha y descubre";
     els.greeting.textContent = state.view === "home" ? "TU ESPACIO, TU SONIDO" : "UN SONIDO PARA CADA MOMENTO";
     document.querySelectorAll("[data-view]").forEach(button => {
       const selected = button.dataset.view === state.view;
@@ -204,9 +365,19 @@
       button.hidden = state.view !== "home";
     });
     renderPlaylists();
+    updateCatalogNotice();
     renderAlbums(activeTracks);
     renderTracks(activeTracks);
     updatePlayer();
+  }
+
+  function updateCatalogNotice() {
+    const shouldShowNotice = state.view === "explore" && !state.jamendoClientId;
+    els.catalogNotice.hidden = !shouldShowNotice;
+    if (shouldShowNotice) {
+      els.catalogMessage.textContent = "Conecta un Client ID gratuito de Jamendo para buscar y escuchar el catálogo con licencias Creative Commons.";
+    }
+    els.catalogStatus.hidden = state.view !== "explore" || !state.jamendoClientId || !state.catalogStatus;
   }
 
   function setView(view, playlist = null, addHistory = true) {
@@ -214,9 +385,20 @@
       state.previousViews.push({ view: state.view, playlist: state.playlist });
       state.forwardViews = [];
     }
+    if (view !== "explore") state.catalogRequestId += 1;
     state.view = view;
     state.playlist = playlist;
     render();
+    if (view === "explore") {
+      if (state.jamendoClientId) loadCatalog({ query: els.search.value });
+    } else if (state.jamendoClientId) {
+      const playlistTracks = view === "favorites"
+        ? state.favorites.filter(id => id.startsWith("jamendo-"))
+        : view === "playlist"
+          ? (allPlaylists().find(item => item.name === playlist)?.tracks || []).filter(id => id.startsWith("jamendo-"))
+          : [];
+      if (playlistTracks.length) loadCatalog({ ids: playlistTracks });
+    }
   }
 
   function setQueue(activeTracks) {
@@ -232,13 +414,34 @@
     els.likeCurrent.setAttribute("aria-pressed", String(!!track && state.favorites.includes(track.id)));
     if (!track) return;
     els.playerTitle.textContent = track.title;
-    els.playerArtist.textContent = `${track.artist} · Muestra original`;
+    if (track.shareUrl) {
+      els.playerTitle.href = track.shareUrl;
+      els.playerTitle.tabIndex = 0;
+      els.playerTitle.setAttribute("aria-label", `Ver ${track.title} de ${track.artist} en Jamendo`);
+    } else {
+      els.playerTitle.removeAttribute("href");
+      els.playerTitle.tabIndex = -1;
+      els.playerTitle.removeAttribute("aria-label");
+    }
+    els.playerArtist.textContent = track.source === "jamendo"
+      ? `${track.artist} · Jamendo · Creative Commons`
+      : `${track.artist} · Muestra original`;
     els.playerArt.setAttribute("style", artworkStyle(track));
-    els.playerArt.innerHTML = `<span aria-hidden="true">${track.glyph}</span>`;
+    els.playerArt.innerHTML = track.imageUrl
+      ? `<img src="${escapeAttribute(track.imageUrl)}" alt="" referrerpolicy="no-referrer">`
+      : `<span aria-hidden="true">${track.glyph}</span>`;
     els.elapsed.textContent = formatTime(state.currentTime);
-    els.duration.textContent = formatTime(track.seconds);
-    els.seekBar.disabled = false;
-    els.seekBar.value = String(Math.round(state.currentTime / track.seconds * 100));
+    const duration = state.audioElement?.src && Number.isFinite(state.audioElement.duration)
+      ? state.audioElement.duration
+      : track.seconds;
+    els.duration.textContent = formatTime(duration);
+    els.seekBar.disabled = !Number.isFinite(duration) || duration <= 0;
+    els.seekBar.value = String(duration > 0 ? Math.round(state.currentTime / duration * 100) : 0);
+    els.playerBadge.innerHTML = "<span></span>";
+    els.playerBadge.append(track.source === "jamendo" ? "JAMENDO · LICENCIA CC" : "MUESTRAS ORIGINALES");
+    els.footerNote.textContent = track.source === "jamendo"
+      ? "La música se reproduce desde Jamendo; cada canción conserva el crédito de su artista y el enlace a su obra y licencia."
+      : "Sonora es una experiencia de muestra. Las melodías son sintetizadas al reproducirse y no contienen grabaciones comerciales.";
     document.querySelectorAll(".track-row").forEach(row => row.classList.toggle("is-playing", row.dataset.trackRow === track.id && state.playing));
   }
 
@@ -306,11 +509,51 @@
     const activeTracks = getActiveTracks();
     setQueue(queueOverride || (activeTracks.some(item => item.id === id) ? activeTracks : tracks));
     if (!state.queue.includes(id)) state.queue.unshift(id);
+    stopSynth();
+    if (state.audioElement) {
+      state.audioElement.pause();
+      state.audioElement.removeAttribute("src");
+      state.audioElement.load();
+    }
     state.currentId = id;
     state.currentTime = 0;
     state.startedAt = Date.now();
     state.playing = true;
     updatePlayer();
+    if (track.source === "jamendo") {
+      const audio = new Audio();
+      state.audioElement = audio;
+      audio.preload = "none";
+      audio.volume = state.volume;
+      audio.addEventListener("timeupdate", () => {
+        if (state.audioElement !== audio) return;
+        state.currentTime = audio.currentTime;
+        updatePlayer();
+      });
+      audio.addEventListener("ended", () => {
+        if (state.audioElement !== audio) return;
+        if (state.repeating) {
+          audio.currentTime = 0;
+          audio.play().catch(error => handleAudioError(error, audio));
+        } else {
+          state.playing = false;
+          playAdjacent(1);
+        }
+      });
+      audio.addEventListener("error", () => {
+        if (state.audioElement === audio) handleAudioError(new Error("La canción no está disponible en este momento."), audio);
+      });
+      audio.src = track.audioUrl;
+      try {
+        await audio.play();
+      } catch (error) {
+        handleAudioError(error, audio);
+      }
+      if (state.audioElement !== audio) return;
+      updatePlayer();
+      return;
+    }
+    state.audioElement = null;
     try {
       await getAudioContext();
       startSynth();
@@ -324,9 +567,25 @@
     }
   }
 
+  function handleAudioError(error, audio = null) {
+    if (audio && state.audioElement !== audio) return;
+    state.playing = false;
+    if (state.audioElement) state.audioElement.pause();
+    stopSynth();
+    updatePlayer();
+    console.error("No se pudo reproducir música en línea:", error);
+    showToast("No pudimos reproducir esta canción. Inténtalo otra vez.");
+  }
+
   function pausePlayback() {
     if (!state.playing) return;
-    state.currentTime = Math.min(getTrack(state.currentId).seconds, state.currentTime + (Date.now() - state.startedAt) / 1000);
+    if (state.audioElement) {
+      state.audioElement.pause();
+      state.currentTime = state.audioElement.currentTime;
+    } else {
+      const track = getTrack(state.currentId);
+      state.currentTime = Math.min(track.seconds, state.currentTime + (Date.now() - state.startedAt) / 1000);
+    }
     state.playing = false;
     stopSynth();
     updatePlayer();
@@ -341,6 +600,15 @@
     state.playing = true;
     state.startedAt = Date.now();
     updatePlayer();
+    if (state.audioElement) {
+      const audio = state.audioElement;
+      try {
+        await audio.play();
+      } catch (error) {
+        handleAudioError(error, audio);
+      }
+      return;
+    }
     try {
       await getAudioContext();
       startSynth();
@@ -386,6 +654,51 @@
     state.toastTimer = window.setTimeout(() => els.toast.classList.remove("is-visible"), 2300);
   }
 
+  function openMusicSettings() {
+    els.clientId.value = state.jamendoClientId;
+    els.musicSettings.showModal();
+  }
+
+  function saveJamendoClientId() {
+    const clientId = els.clientId.value.trim();
+    if (!clientId || clientId.length > 128 || /\s/.test(clientId)) {
+      showToast("Introduce un Client ID válido de Jamendo.");
+      els.clientId.focus();
+      return;
+    }
+    try {
+      localStorage.setItem(JAMENDO_CLIENT_KEY, clientId);
+    } catch (error) {
+      console.error("No se pudo guardar el Client ID:", error);
+      showToast("No pudimos guardar el Client ID en este dispositivo.");
+      return;
+    }
+    state.jamendoClientId = clientId;
+    state.catalogRequestId += 1;
+    state.catalogTracks = Object.create(null);
+    els.musicSettings.close();
+    if (state.view !== "explore") setView("explore");
+    else loadCatalog({ query: els.search.value });
+  }
+
+  function clearJamendoClientId() {
+    try {
+      localStorage.removeItem(JAMENDO_CLIENT_KEY);
+    } catch (error) {
+      console.error("No se pudo borrar el Client ID:", error);
+      showToast("No pudimos borrar el Client ID guardado.");
+      return;
+    }
+    state.jamendoClientId = "";
+    state.catalogRequestId += 1;
+    state.catalogResults = [];
+    state.catalogTracks = Object.create(null);
+    setCatalogStatus("");
+    els.musicSettings.close();
+    render();
+    showToast("Jamendo se desconectó de este dispositivo.");
+  }
+
   function escapeHtml(value) {
     return value.replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
   }
@@ -411,6 +724,11 @@
 
   function updateClock() {
     if (!state.playing) return;
+    if (state.audioElement) {
+      state.currentTime = state.audioElement.currentTime || 0;
+      updatePlayer();
+      return;
+    }
     const track = getTrack(state.currentId);
     if (!track) return;
     state.currentTime = Math.min(track.seconds, state.currentTime + (Date.now() - state.startedAt) / 1000);
@@ -448,7 +766,7 @@
       const playButton = event.target.closest("[data-play]");
       const albumPlayButton = event.target.closest("[data-play-album]");
       if (albumPlayButton) {
-        const albumTracks = tracks.filter(track => track.album === albumPlayButton.dataset.playAlbum);
+        const albumTracks = getActiveTracks().filter(track => track.album === albumPlayButton.dataset.playAlbum);
         playTrack(albumTracks[0].id, albumTracks);
         return;
       }
@@ -479,14 +797,20 @@
       }
       const albumCard = event.target.closest(".album-card");
       if (albumCard) {
-        const albumTracks = tracks.filter(track => track.album === albumCard.dataset.album);
+        const albumTracks = getActiveTracks().filter(track => track.album === albumCard.dataset.album);
         playTrack(albumTracks[0].id, albumTracks);
       }
     });
 
     document.getElementById("play-button").addEventListener("click", togglePlayback);
     document.getElementById("previous-button").addEventListener("click", () => {
-      if (state.currentTime > 3) { state.currentTime = 0; state.startedAt = Date.now(); updatePlayer(); startSynth(); }
+      if (state.currentTime > 3) {
+        state.currentTime = 0;
+        state.startedAt = Date.now();
+        if (state.audioElement) state.audioElement.currentTime = 0;
+        updatePlayer();
+        if (!state.audioElement) startSynth();
+      }
       else playAdjacent(-1);
     });
     document.getElementById("next-button").addEventListener("click", () => playAdjacent(1));
@@ -542,22 +866,50 @@
     document.getElementById("like-current").addEventListener("click", () => {
       if (state.currentId) toggleFavorite(state.currentId);
     });
+    document.getElementById("music-settings").addEventListener("click", openMusicSettings);
+    document.getElementById("catalog-action").addEventListener("click", openMusicSettings);
+    document.getElementById("save-jamendo-id").addEventListener("click", saveJamendoClientId);
+    document.getElementById("clear-jamendo-id").addEventListener("click", clearJamendoClientId);
     els.search.addEventListener("input", () => {
-      const list = getActiveTracks();
-      renderAlbums(list);
-      renderTracks(list);
-      setQueue(list);
-      if (els.search.value.trim()) els.pageTitle.textContent = "Resultados para tu búsqueda";
+      if (state.view !== "explore" && els.search.value.trim()) {
+        state.previousViews.push({ view: state.view, playlist: state.playlist });
+        state.forwardViews = [];
+        state.view = "explore";
+        state.playlist = null;
+      }
+      if (state.view === "explore") {
+        window.clearTimeout(state.searchTimer);
+        state.catalogRequestId += 1;
+        state.catalogResults = [];
+        setCatalogStatus(state.jamendoClientId ? "Buscando música en Jamendo…" : "");
+        render();
+        if (state.jamendoClientId) {
+          state.searchTimer = window.setTimeout(
+            () => loadCatalog({ query: els.search.value }),
+            350
+          );
+        }
+        return;
+      }
+      render();
+      setQueue(getActiveTracks());
     });
     els.seekBar.addEventListener("input", () => {
       const track = getTrack(state.currentId);
       if (!track) return;
-      state.currentTime = track.seconds * Number(els.seekBar.value) / 100;
+      const duration = state.audioElement?.src && Number.isFinite(state.audioElement.duration)
+        ? state.audioElement.duration
+        : track.seconds;
+      state.currentTime = duration * Number(els.seekBar.value) / 100;
+      if (state.audioElement) {
+        state.audioElement.currentTime = state.currentTime;
+      }
       state.startedAt = Date.now();
       updatePlayer();
     });
     els.volume.addEventListener("input", () => {
       state.volume = Number(els.volume.value) / 100;
+      if (state.audioElement) state.audioElement.volume = state.volume;
     });
     document.getElementById("back-button").addEventListener("click", () => {
       if (!state.previousViews.length) return;

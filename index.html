@@ -50,6 +50,7 @@
           <kbd>⌘ K</kbd>
         </label>
         <button id="install-button" class="install-button" hidden><span aria-hidden="true">↓</span> Instalar</button>
+        <button id="music-settings" class="icon-button settings-button" aria-label="Configurar música en línea" title="Configurar música en línea">⚙</button>
         <button class="profile-button" aria-label="Perfil de Sonora">S</button>
       </header>
 
@@ -94,12 +95,20 @@
         <section class="section-block track-section">
           <div class="section-heading">
             <div><p class="eyebrow">DALE AL PLAY</p><h2 id="tracks-title">Escucha y descubre</h2></div>
-            <span class="demo-badge"><span></span> MUESTRAS ORIGINALES</span>
+            <span id="source-badge" class="demo-badge"><span></span> MUESTRAS ORIGINALES</span>
           </div>
+          <div id="catalog-notice" class="catalog-notice" hidden>
+            <div class="catalog-notice-copy">
+              <span class="catalog-note-icon" aria-hidden="true">♫</span>
+              <div><strong>Descubre música independiente</strong><p id="catalog-message">Conecta un Client ID gratuito de Jamendo para buscar y escuchar el catálogo con licencias Creative Commons.</p></div>
+            </div>
+            <button id="catalog-action" class="button button-outline">Configurar catálogo</button>
+          </div>
+          <div id="catalog-status" class="catalog-status" role="status" aria-live="polite" hidden></div>
           <div class="track-list" id="track-list" role="list"></div>
           <p id="empty-state" class="empty-state" hidden>No encontramos música con ese nombre. Prueba otra búsqueda.</p>
         </section>
-        <footer class="footer-note">Sonora es una experiencia de muestra. Las melodías son sintetizadas al reproducirse y no contienen grabaciones comerciales.</footer>
+        <footer id="footer-note" class="footer-note">Sonora es una experiencia de muestra. Las melodías son sintetizadas al reproducirse y no contienen grabaciones comerciales.</footer>
       </div>
     </main>
   </div>
@@ -114,7 +123,7 @@
   <footer class="player" aria-label="Reproductor">
     <div class="now-playing">
       <div class="mini-art" id="player-art"><span>♫</span></div>
-      <div class="now-playing-copy"><strong id="player-title">Elige una canción</strong><span id="player-artist">Sonora · Muestra</span></div>
+      <div class="now-playing-copy"><a id="player-title" href="#" target="_blank" rel="noopener noreferrer">Elige una canción</a><span id="player-artist">Sonora · Muestra</span></div>
       <button id="like-current" class="icon-button like-button" aria-label="Añadir a Me gusta" aria-pressed="false">♡</button>
     </div>
     <div class="player-center">
@@ -156,6 +165,20 @@
       <label for="playlist-select">Elige una lista</label>
       <select id="playlist-select" required></select>
       <div class="dialog-actions"><button class="button button-outline">Cancelar</button><button id="confirm-add-track" class="button button-primary" value="add">Añadir</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="music-settings-dialog" class="dialog">
+    <form method="dialog" class="dialog-form">
+      <button class="dialog-close" aria-label="Cerrar">×</button>
+      <p class="eyebrow">MÚSICA INDEPENDIENTE</p>
+      <h2>Conectar Jamendo</h2>
+      <p class="settings-description">Usa el Client ID público de tu aplicación Jamendo para explorar y reproducir música del catálogo. No introduzcas contraseñas ni claves privadas.</p>
+      <a class="registration-link" href="https://devportal.jamendo.com/" target="_blank" rel="noopener noreferrer">Obtener un Client ID en Jamendo <span aria-hidden="true">↗</span></a>
+      <label for="jamendo-client-id">Client ID</label>
+      <input id="jamendo-client-id" maxlength="128" autocomplete="off" placeholder="Pega aquí tu Client ID" spellcheck="false">
+      <p class="license-note">La app enlaza cada canción a su autor y licencia. El catálogo requiere conexión a Internet y está sujeto a los términos de Jamendo.</p>
+      <div class="dialog-actions"><button id="clear-jamendo-id" class="button button-outline" type="button">Desconectar</button><button id="save-jamendo-id" class="button button-primary" type="button">Guardar</button></div>
     </form>
   </dialog>
 
